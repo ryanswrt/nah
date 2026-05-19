@@ -193,3 +193,134 @@ class TestCrashLog:
         assert size < 1_000
         content = open(log_file).read()
         assert "RuntimeError" in content
+
+
+class TestMainEntry:
+    """nah.hook.main_entry() — console-script wrapper used by the `nah-hook` binary.
+
+    Mirrors the crash-safety guarantees of the legacy nah_guard.py shim:
+    buffer main() stdout, validate JSON, fall back to ASK on failure, log
+    crashes, exit via os._exit so a broken stdout pipe can't crash Python's
+    shutdown path.
+    """
+
+    @pytest.fixture
+    def patched_exit(self, monkeypatch):
+        """Convert os._exit() to SystemExit so pytest can capture it."""
+        def _fake_exit(code):
+            raise SystemExit(code)
+        monkeypatch.setattr(os, "_exit", _fake_exit)
+
+    @pytest.fixture
+    def isolated_home(self, tmp_path, monkeypatch):
+        """Redirect HOME so the log writer doesn't touch the user's real ~/.config."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("APPDATA", raising=False)
+        return tmp_path
+
+    def test_passes_through_main_output_on_success(
+        self, patched_exit, isolated_home, monkeypatch, capsys
+    ):
+        """When main() writes valid JSON, main_entry writes the same JSON."""
+        import io as _io
+        from nah import hook as hook_mod
+
+        decision = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}\n'
+        monkeypatch.setattr(hook_mod, "main", lambda: sys.stdout.write(decision))
+        monkeypatch.setattr("sys.stdin", _io.StringIO(
+            '{"tool_name":"Bash","tool_input":{"command":"ls"},"hook_event_name":"PreToolUse"}'
+        ))
+
+        with pytest.raises(SystemExit) as exc:
+            hook_mod.main_entry()
+
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "allow"
+        assert not (isolated_home / ".config" / "nah" / "hook-errors.log").exists()
+
+    def test_falls_back_to_ask_when_main_raises(
+        self, patched_exit, isolated_home, monkeypatch, capsys
+    ):
+        """If main() raises, the ASK fallback gets written and the crash is logged."""
+        import io as _io
+        from nah import hook as hook_mod
+
+        def _boom():
+            raise RuntimeError("synthetic crash")
+        monkeypatch.setattr(hook_mod, "main", _boom)
+        monkeypatch.setattr("sys.stdin", _io.StringIO(
+            '{"tool_name":"Bash","tool_input":{"command":"ls"},"hook_event_name":"PreToolUse"}'
+        ))
+
+        with pytest.raises(SystemExit) as exc:
+            hook_mod.main_entry()
+
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "ask"
+        log = isolated_home / ".config" / "nah" / "hook-errors.log"
+        assert log.exists()
+        assert "RuntimeError" in log.read_text()
+        assert "Bash" in log.read_text()
+
+    def test_falls_back_to_ask_when_main_emits_invalid_json(
+        self, patched_exit, isolated_home, monkeypatch, capsys
+    ):
+        """If main() emits non-JSON, main_entry replaces it with ASK and logs."""
+        import io as _io
+        from nah import hook as hook_mod
+
+        monkeypatch.setattr(hook_mod, "main",
+                            lambda: sys.stdout.write("not valid json\n"))
+        monkeypatch.setattr("sys.stdin", _io.StringIO(
+            '{"tool_name":"Edit","hook_event_name":"PreToolUse"}'
+        ))
+
+        with pytest.raises(SystemExit) as exc:
+            hook_mod.main_entry()
+
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "ask"
+        log = isolated_home / ".config" / "nah" / "hook-errors.log"
+        assert log.exists()
+        assert "invalid JSON from main" in log.read_text()
+
+    def test_post_tool_failure_emits_no_output(
+        self, patched_exit, isolated_home, monkeypatch, capsys
+    ):
+        """PostToolUse hooks have no permission concept — fall through silently on crash."""
+        import io as _io
+        from nah import hook as hook_mod
+
+        monkeypatch.setattr(hook_mod, "main",
+                            lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        monkeypatch.setattr("sys.stdin", _io.StringIO(
+            '{"tool_name":"Bash","hook_event_name":"PostToolUse"}'
+        ))
+
+        with pytest.raises(SystemExit) as exc:
+            hook_mod.main_entry()
+
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert out == ""
+
+    def test_empty_main_output_passes_through(
+        self, patched_exit, isolated_home, monkeypatch, capsys
+    ):
+        """active_allow=False means main() writes nothing; main_entry stays silent."""
+        import io as _io
+        from nah import hook as hook_mod
+
+        monkeypatch.setattr(hook_mod, "main", lambda: None)
+        monkeypatch.setattr("sys.stdin", _io.StringIO(
+            '{"tool_name":"Bash","hook_event_name":"PreToolUse"}'
+        ))
+
+        with pytest.raises(SystemExit) as exc:
+            hook_mod.main_entry()
+
+        assert exc.value.code == 0
+        assert capsys.readouterr().out == ""

@@ -153,14 +153,42 @@ os._exit(0)
 '''
 
 
+def _resolve_nah_hook_binary() -> str | None:
+    """Locate the nah-hook console-script binary, or None if unavailable.
+
+    Every supported install method (pip, pipx, uv, nix) produces a nah-hook
+    binary next to the `nah` script that knows how to import nah. Prefer that
+    over invoking sys.executable directly — on isolated builds (notably nix),
+    sys.executable resolves to a bare interpreter with no `nah` on sys.path.
+    """
+    # Prefer the sibling of the currently running nah CLI: most accurate at
+    # install time, because `nah install claude` is itself launched via the
+    # nah wrapper.
+    if sys.argv and sys.argv[0]:
+        candidate = Path(sys.argv[0]).resolve().parent / "nah-hook"
+        if candidate.exists():
+            return str(candidate).replace("\\", "/")
+    found = shutil.which("nah-hook")
+    if found:
+        return found.replace("\\", "/")
+    return None
+
+
 def _hook_command() -> str:
-    """Build the command string for settings.json hook entries."""
+    """Build the command string for settings.json hook entries.
+
+    Prefers the nah-hook entry-point binary. Falls back to the legacy
+    "{sys.executable} {nah_guard.py}" form only when no nah-hook is found,
+    which can happen on hand-rolled installs that bypass the entry-point
+    mechanism.
+    """
     # Use POSIX forward-slash paths: safe in both bash and cmd.exe on Windows.
     # shlex.quote() produces POSIX single-quoting which only works when the
     # command is interpreted by a POSIX shell. Claude Code may invoke hooks
     # via cmd.exe or direct OS spawn, where single quotes are literal chars.
-    # Replace backslashes explicitly because Path(...).as_posix() does not
-    # normalize Windows-style strings when running on POSIX.
+    nah_hook = _resolve_nah_hook_binary()
+    if nah_hook is not None:
+        return f'"{nah_hook}"'
     exe = str(sys.executable).replace("\\", "/")
     script = str(_HOOK_SCRIPT).replace("\\", "/")
     return f'"{exe}" "{script}"'
