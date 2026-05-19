@@ -165,8 +165,15 @@ def _resolve_nah_hook_binary() -> str | None:
     # install time, because `nah install claude` is itself launched via the
     # nah wrapper.
     if sys.argv and sys.argv[0]:
-        candidate = Path(sys.argv[0]).resolve().parent / "nah-hook"
-        if candidate.exists():
+        candidate: Path | None = None
+        try:
+            candidate = Path(sys.argv[0]).resolve().parent / "nah-hook"
+        except (OSError, NotImplementedError, ValueError):
+            # Path() can refuse to construct (e.g. tests monkeypatching
+            # os.name to simulate a different platform, or an exotic
+            # non-filesystem sys.argv[0]). Fall through to shutil.which.
+            candidate = None
+        if candidate is not None and candidate.exists():
             return str(candidate).replace("\\", "/")
     found = shutil.which("nah-hook")
     if found:

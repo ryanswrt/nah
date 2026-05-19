@@ -2027,6 +2027,20 @@ class TestResolveNahHookBinary:
 
         assert cli_mod._resolve_nah_hook_binary() is None
 
+    def test_path_construction_failure_falls_through(self, monkeypatch):
+        """Path() refusing to construct (e.g. simulated cross-platform tests
+        that flip os.name to 'nt' on Linux) must not crash — fall through
+        to shutil.which."""
+        import nah.cli as cli_mod
+        def _boom(*args, **kwargs):
+            raise NotImplementedError("cannot instantiate WindowsPath")
+        monkeypatch.setattr(cli_mod, "Path", _boom)
+        monkeypatch.setattr("sys.argv", ["/whatever"])
+        monkeypatch.setattr(cli_mod.shutil, "which",
+                            lambda name: "/opt/nah/bin/nah-hook" if name == "nah-hook" else None)
+
+        assert cli_mod._resolve_nah_hook_binary() == "/opt/nah/bin/nah-hook"
+
 
 class TestHookCommandUsesNahHook:
     """When nah-hook entry-point binary is available, prefer it over the shim+interpreter form."""
