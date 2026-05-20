@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-LEGACY_HOOK_MARKERS = ("nah_guard.py",)
+LEGACY_HOOK_MARKERS = ("nah_guard.py", "nah-hook")
 PLUGIN_HOOK_MARKERS = ("nah-plugin-hook", "nah-plugin-post-tool", "nah_plugin_runner.py")
 TOOL_HOOK_EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
 
