@@ -1945,13 +1945,14 @@ class TestCliPluginMode:
 
 
 class TestHookCommand:
-    """_hook_command() must produce quoted POSIX paths for bash compatibility."""
+    """_hook_command() legacy fallback (used when no nah-hook entry-point binary)."""
 
     def test_windows_backslashes_converted(self, monkeypatch):
         """Backslash paths from sys.executable/pathlib are converted to forward slashes."""
         import shlex
         import nah.cli as cli_mod
         from pathlib import PureWindowsPath
+        monkeypatch.setattr(cli_mod, "_resolve_nah_hook_binary", lambda: None)
         monkeypatch.setattr(cli_mod, "_HOOK_SCRIPT",
                             PureWindowsPath(r"C:\Users\test\.claude\hooks\nah_guard.py"))
         monkeypatch.setattr("sys.executable",
@@ -1966,6 +1967,7 @@ class TestHookCommand:
         import shlex
         import nah.cli as cli_mod
         from pathlib import PurePosixPath
+        monkeypatch.setattr(cli_mod, "_resolve_nah_hook_binary", lambda: None)
         monkeypatch.setattr(cli_mod, "_HOOK_SCRIPT",
                             PurePosixPath("/home/user/.claude/hooks/nah_guard.py"))
         monkeypatch.setattr("sys.executable", "/usr/bin/python3")
@@ -1979,6 +1981,7 @@ class TestHookCommand:
         import shlex
         import nah.cli as cli_mod
         from pathlib import PurePosixPath
+        monkeypatch.setattr(cli_mod, "_resolve_nah_hook_binary", lambda: None)
         monkeypatch.setattr(cli_mod, "_HOOK_SCRIPT",
                             PurePosixPath("/home/my user/.claude/hooks/nah_guard.py"))
         monkeypatch.setattr("sys.executable", "/opt/my python/bin/python3")
@@ -1986,3 +1989,83 @@ class TestHookCommand:
         assert len(parts) == 2
         assert "my python" in parts[0]
         assert "my user" in parts[1]
+
+
+class TestResolveNahHookBinary:
+    """_resolve_nah_hook_binary() locates the nah-hook console-script binary."""
+
+    def test_finds_sibling_of_nah_cli(self, tmp_path, monkeypatch):
+        """Prefers a nah-hook next to sys.argv[0] — matches current install."""
+        import nah.cli as cli_mod
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "nah").write_text("#!/bin/sh\n")
+        nah_hook = bin_dir / "nah-hook"
+        nah_hook.write_text("#!/bin/sh\n")
+        monkeypatch.setattr("sys.argv", [str(bin_dir / "nah")])
+
+        resolved = cli_mod._resolve_nah_hook_binary()
+
+        assert resolved == str(nah_hook).replace("\\", "/")
+
+    def test_falls_back_to_which(self, monkeypatch, tmp_path):
+        """When no sibling exists, fall back to shutil.which('nah-hook')."""
+        import nah.cli as cli_mod
+        monkeypatch.setattr("sys.argv", [str(tmp_path / "no-such-nah")])
+        monkeypatch.setattr(cli_mod.shutil, "which",
+                            lambda name: "/opt/nah/bin/nah-hook" if name == "nah-hook" else None)
+
+        resolved = cli_mod._resolve_nah_hook_binary()
+
+        assert resolved == "/opt/nah/bin/nah-hook"
+
+    def test_returns_none_when_unavailable(self, monkeypatch, tmp_path):
+        """Returns None when neither sibling nor PATH has nah-hook."""
+        import nah.cli as cli_mod
+        monkeypatch.setattr("sys.argv", [str(tmp_path / "no-such-nah")])
+        monkeypatch.setattr(cli_mod.shutil, "which", lambda name: None)
+
+        assert cli_mod._resolve_nah_hook_binary() is None
+
+    def test_path_construction_failure_falls_through(self, monkeypatch):
+        """Path() refusing to construct (e.g. simulated cross-platform tests
+        that flip os.name to 'nt' on Linux) must not crash — fall through
+        to shutil.which."""
+        import nah.cli as cli_mod
+        def _boom(*args, **kwargs):
+            raise NotImplementedError("cannot instantiate WindowsPath")
+        monkeypatch.setattr(cli_mod, "Path", _boom)
+        monkeypatch.setattr("sys.argv", ["/whatever"])
+        monkeypatch.setattr(cli_mod.shutil, "which",
+                            lambda name: "/opt/nah/bin/nah-hook" if name == "nah-hook" else None)
+
+        assert cli_mod._resolve_nah_hook_binary() == "/opt/nah/bin/nah-hook"
+
+
+class TestHookCommandUsesNahHook:
+    """When nah-hook entry-point binary is available, prefer it over the shim+interpreter form."""
+
+    def test_returns_single_token_command(self, monkeypatch):
+        """Output is the binary path alone, no separate interpreter."""
+        import shlex
+        import nah.cli as cli_mod
+        monkeypatch.setattr(cli_mod, "_resolve_nah_hook_binary",
+                            lambda: "/opt/nah/bin/nah-hook")
+
+        cmd = cli_mod._hook_command()
+        parts = shlex.split(cmd)
+
+        assert len(parts) == 1
+        assert parts[0] == "/opt/nah/bin/nah-hook"
+
+    def test_does_not_invoke_sys_executable(self, monkeypatch):
+        """The legacy {sys.executable} {shim} form is what breaks on isolated installs."""
+        import nah.cli as cli_mod
+        monkeypatch.setattr("sys.executable", "/usr/bin/python3.13")
+        monkeypatch.setattr(cli_mod, "_resolve_nah_hook_binary",
+                            lambda: "/opt/nah/bin/nah-hook")
+
+        cmd = cli_mod._hook_command()
+
+        assert "/usr/bin/python3.13" not in cmd
+        assert "nah_guard.py" not in cmd

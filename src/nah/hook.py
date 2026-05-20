@@ -1038,5 +1038,118 @@ def main():
             pass
 
 
+_ASK_FALLBACK = (
+    '{"hookSpecificOutput": {"hookEventName": "PreToolUse", '
+    '"permissionDecision": "ask", '
+    '"permissionDecisionReason": "nah: error, requesting confirmation"}}\n'
+)
+
+
+def _log_hook_entry_error(tool_name: str, err: BaseException) -> None:
+    """Append a crash entry to hook-errors.log. Never raises."""
+    try:
+        from datetime import datetime
+        appdata = os.environ.get("APPDATA") if sys.platform == "win32" else ""
+        base = appdata or os.path.join(os.path.expanduser("~"), ".config")
+        log_path = os.path.join(base, "nah", "hook-errors.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        line = (
+            f"{datetime.now().isoformat(timespec='seconds')} "
+            f"{tool_name or 'unknown'} "
+            f"{type(err).__name__}: {str(err)[:200]}\n"
+        )
+        try:
+            if os.path.getsize(log_path) > 1_000_000:
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.write(line)
+                return
+        except OSError:
+            # File doesn't exist yet or stat failed — fall through to append,
+            # which will create it. Either way the next write surfaces real errors.
+            pass
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as exc:
+        sys.stderr.write(f"nah: log: {exc}\n")
+
+
+def main_entry():
+    """Console-script entry point for ``nah-hook``.
+
+    Wraps :func:`main` with the crash-safety the legacy ``nah_guard.py`` shim
+    provides: captures stdout into a buffer, validates JSON, falls back to
+    an ASK response on any failure, logs the exception, and exits via
+    ``os._exit`` so Python's shutdown path can't crash on a broken stdout
+    pipe.
+    """
+    import io
+
+    post_tool_events = {"PostToolUse", "PostToolUseFailure"}
+    real_stdout = sys.stdout
+    real_stdin = sys.stdin
+    tool_name = ""
+    event_name = "PreToolUse"
+
+    def _fallback() -> str:
+        return "" if event_name in post_tool_events else _ASK_FALLBACK
+
+    def _safe_write(data: str) -> None:
+        if not data:
+            return
+        try:
+            real_stdout.write(data)
+            real_stdout.flush()
+        except BrokenPipeError:
+            pass
+
+    try:
+        payload = real_stdin.read()
+        try:
+            data = json.loads(payload or "{}")
+            if isinstance(data, dict):
+                tool_name = str(data.get("tool_name") or "")
+                event_name = str(
+                    data.get("hook_event_name")
+                    or data.get("hookEventName")
+                    or "PreToolUse"
+                )
+        except json.JSONDecodeError:
+            pass
+
+        buf = io.StringIO()
+        sys.stdin = io.StringIO(payload)
+        sys.stdout = buf
+        try:
+            main()
+        finally:
+            sys.stdout = real_stdout
+            sys.stdin = real_stdin
+
+        output = buf.getvalue()
+        if output.strip():
+            try:
+                json.loads(output)
+            except (json.JSONDecodeError, ValueError) as exc:
+                _log_hook_entry_error(
+                    tool_name,
+                    ValueError(f"invalid JSON from main: {output[:200]}"),
+                )
+                output = _fallback()
+        _safe_write(output)
+    except SystemExit as e:
+        sys.stdout = real_stdout
+        sys.stdin = real_stdin
+        if event_name in post_tool_events:
+            os._exit(0)
+        os._exit(e.code if isinstance(e.code, int) else 0)
+    except BaseException as e:
+        sys.stdout = real_stdout
+        sys.stdin = real_stdin
+        _log_hook_entry_error(tool_name, e)
+        _safe_write(_fallback())
+
+    os._exit(0)
+
+
 if __name__ == "__main__":
     main()

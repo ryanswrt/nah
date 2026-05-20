@@ -72,6 +72,30 @@ def test_detects_mixed_direct_and_plugin_hooks(tmp_path):
     assert state.plugin_hooks[0].detail == "PostToolUse[0]"
 
 
+def test_detects_nah_hook_entry_point_form(tmp_path):
+    """Entries written by the new _hook_command() (single nah-hook binary path,
+    no nah_guard.py reference) must still be classified as direct-install hooks
+    so `nah uninstall claude` finds and removes them."""
+    settings = _write(
+        tmp_path / "settings.json",
+        {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": "/nix/store/abc-nah-0.8.3/bin/nah-hook"}],
+                    },
+                ],
+            },
+        },
+    )
+
+    state = plugin_state.detect_nah_install_state(settings_paths=[settings])
+
+    assert state.has_legacy
+    assert len(state.legacy_hooks) == 1
+
+
 def test_malformed_settings_reports_error(tmp_path):
     settings = tmp_path / "settings.json"
     settings.write_text("{not json", encoding="utf-8")
